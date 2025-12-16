@@ -97,7 +97,7 @@ def get_lora_files() -> List[str]:
 
 def get_diffusion_models() -> List[str]:
     """
-    Get list of available diffusion models from ComfyUI/models/diffusion_models/ and /checkpoints/.
+    Get list of available diffusion models from multiple possible locations.
     Returns model directory names that contain a valid model_index.json.
     """
     models = ["none"]  # Default option for manual entry
@@ -105,14 +105,23 @@ def get_diffusion_models() -> List[str]:
     # Get ComfyUI base path
     comfy_base = os.path.dirname(os.path.dirname(PACKAGE_DIR))
 
-    # Directories to scan for models
+    # Directories to scan for models (name, path)
     model_dirs = [
+        # ComfyUI model directories
         ("diffusion_models", os.path.join(comfy_base, "models", "diffusion_models")),
         ("checkpoints", os.path.join(comfy_base, "models", "checkpoints")),
+        ("unet", os.path.join(comfy_base, "models", "unet")),
+        # Root level directories
+        ("/checkpoints", "/checkpoints"),
+        ("/diffusion_models", "/diffusion_models"),
+        # Home directory
+        ("~/checkpoints", os.path.expanduser("~/checkpoints")),
+        ("~/ComfyUI/models/checkpoints", os.path.expanduser("~/ComfyUI/models/checkpoints")),
+        ("~/ComfyUI/models/diffusion_models", os.path.expanduser("~/ComfyUI/models/diffusion_models")),
     ]
 
     for dir_name, model_dir in model_dirs:
-        if not os.path.exists(model_dir):
+        if not model_dir or not os.path.exists(model_dir):
             continue
 
         try:
@@ -156,15 +165,16 @@ class SimpleTunerFlux2PipelineLoader:
         available_models = get_diffusion_models()
         return {
             "required": {
-                "model_name": (available_models, {"default": available_models[0]}),
+                "model_path": ("STRING", {
+                    "default": "",
+                    "multiline": False,
+                    "placeholder": "Path to model or HuggingFace ID (e.g., /path/to/model or black-forest-labs/FLUX.2-dev)",
+                }),
                 "torch_dtype": (["bfloat16", "float16", "float32"], {"default": "bfloat16"}),
                 "device": (["cuda", "cpu", "auto"], {"default": "auto"}),
             },
             "optional": {
-                "model_id_override": ("STRING", {
-                    "default": "",
-                    "multiline": False,
-                }),
+                "model_dropdown": (available_models, {"default": available_models[0]}),
                 "use_safetensors": ("BOOLEAN", {"default": True}),
                 "hf_token": ("STRING", {
                     "default": "",
@@ -175,19 +185,19 @@ class SimpleTunerFlux2PipelineLoader:
 
     def load_pipeline(
         self,
-        model_name: str,
+        model_path: str,
         torch_dtype: str,
         device: str,
-        model_id_override: str = "",
+        model_dropdown: str = "none",
         use_safetensors: bool = True,
         hf_token: str = "",
     ):
         global _cached_pipeline, _cached_pipeline_id
 
-        # Use override if provided, otherwise use dropdown selection
-        model_id = model_id_override.strip() if model_id_override.strip() else model_name
+        # Use model_path if provided, otherwise use dropdown selection
+        model_id = model_path.strip() if model_path.strip() else model_dropdown
 
-        # Skip if "none" selected and no override provided
+        # Skip if "none" selected and no path provided
         if model_id == "none":
             raise ValueError(
                 "No model selected. Either select a local model from the dropdown "
@@ -303,6 +313,15 @@ class SimpleTunerFlux2PipelineLoader:
         """
         Check if model exists locally in various possible locations.
         Returns the absolute local path if found, None otherwise.
+
+        Searches in order:
+        1. Absolute path (if model_id is absolute)
+        2. Relative to current directory
+        3. ComfyUI/models/diffusion_models/
+        4. ComfyUI/models/checkpoints/
+        5. /checkpoints/ (root level)
+        6. /diffusion_models/ (root level)
+        7. HuggingFace cache structures in all above locations
         """
         # Ensure cache_dir is absolute
         cache_dir = os.path.abspath(cache_dir)
@@ -310,7 +329,17 @@ class SimpleTunerFlux2PipelineLoader:
         # Get ComfyUI base for checking multiple folders
         comfy_base = os.path.dirname(os.path.dirname(PACKAGE_DIR))
 
-        # Check if model_id has a folder prefix (e.g., "diffusion_models/FLUX.2-dev" or "checkpoints/FLUX.2-dev")
+        # Possible local paths to check
+        paths_to_check = []
+
+        # 0. Check if model_id is already an absolute path that exists
+        if os.path.isabs(model_id):
+            if os.path.exists(os.path.join(model_id, "model_index.json")):
+                logger.info(f"Found valid local model at absolute path: {model_id}")
+                return model_id
+            paths_to_check.append(model_id)
+
+        # 1. Check if model_id has a folder prefix (e.g., "diffusion_models/FLUX.2-dev" or "checkpoints/FLUX.2-dev")
         if model_id.startswith("diffusion_models/") or model_id.startswith("checkpoints/"):
             # Direct path from dropdown selection
             direct_path = os.path.join(comfy_base, "models", model_id.replace("/", os.sep))
@@ -318,27 +347,36 @@ class SimpleTunerFlux2PipelineLoader:
                 logger.info(f"Found valid local model at: {direct_path}")
                 return os.path.abspath(direct_path)
 
-        # Possible local paths to check
-        paths_to_check = []
-
-        # Directories to search
+        # All directories to search for models
         search_dirs = [
-            cache_dir,  # diffusion_models (primary)
-            os.path.join(comfy_base, "models", "checkpoints"),  # checkpoints folder
+            # ComfyUI model directories
+            cache_dir,  # ComfyUI/models/diffusion_models/
+            os.path.join(comfy_base, "models", "checkpoints"),  # ComfyUI/models/checkpoints/
+            os.path.join(comfy_base, "models", "unet"),  # ComfyUI/models/unet/
+            # Root level directories
+            "/checkpoints",
+            "/diffusion_models",
+            "/models/checkpoints",
+            "/models/diffusion_models",
+            # Home directory
+            os.path.expanduser("~/checkpoints"),
+            os.path.expanduser("~/models/checkpoints"),
+            os.path.expanduser("~/ComfyUI/models/checkpoints"),
+            os.path.expanduser("~/ComfyUI/models/diffusion_models"),
         ]
 
         # Extract model name (last part of path)
         model_name = model_id.split("/")[-1] if "/" in model_id else model_id
 
         for search_dir in search_dirs:
-            if not os.path.exists(search_dir):
+            if not search_dir or not os.path.exists(search_dir):
                 continue
 
-            # 1. Direct path (e.g., ComfyUI/models/diffusion_models/FLUX.2-dev/)
+            # 1. Direct path (e.g., /checkpoints/FLUX.2-dev/)
             paths_to_check.append(os.path.join(search_dir, model_name))
 
-            # 2. Full model_id path (e.g., ComfyUI/models/diffusion_models/black-forest-labs/FLUX.2-dev/)
-            if "/" in model_id:
+            # 2. Full model_id path (e.g., /checkpoints/black-forest-labs/FLUX.2-dev/)
+            if "/" in model_id and not model_id.startswith("diffusion_models/") and not model_id.startswith("checkpoints/"):
                 paths_to_check.append(os.path.join(search_dir, model_id.replace("/", os.sep)))
 
             # 3. HuggingFace cache structure (models--org--name/snapshots/...)
@@ -348,24 +386,27 @@ class SimpleTunerFlux2PipelineLoader:
                 # Find the latest snapshot
                 snapshots_dir = os.path.join(hf_cache_path, "snapshots")
                 if os.path.exists(snapshots_dir):
-                    snapshots = os.listdir(snapshots_dir)
-                    if snapshots:
-                        # Use the first (or latest) snapshot
-                        paths_to_check.append(os.path.join(snapshots_dir, snapshots[0]))
-
-        # 4. Check if model_id is already an absolute path
-        if os.path.isabs(model_id):
-            paths_to_check.append(model_id)
+                    try:
+                        snapshots = os.listdir(snapshots_dir)
+                        if snapshots:
+                            # Use the first (or latest) snapshot
+                            paths_to_check.append(os.path.join(snapshots_dir, snapshots[0]))
+                    except Exception:
+                        pass
 
         # Check each path for model_index.json (indicates a valid diffusers model)
         for path in paths_to_check:
-            # Ensure absolute path
-            abs_path = os.path.abspath(path)
-            model_index = os.path.join(abs_path, "model_index.json")
-            if os.path.exists(model_index):
-                logger.info(f"Found valid local model at: {abs_path}")
-                return abs_path
+            try:
+                # Ensure absolute path
+                abs_path = os.path.abspath(path)
+                model_index = os.path.join(abs_path, "model_index.json")
+                if os.path.exists(model_index):
+                    logger.info(f"Found valid local model at: {abs_path}")
+                    return abs_path
+            except Exception:
+                continue
 
+        logger.warning(f"No local model found for: {model_id}")
         return None
 
 
