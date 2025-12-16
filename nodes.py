@@ -191,13 +191,11 @@ class SimpleTunerFlux2LoRALoader:
 
     @classmethod
     def INPUT_TYPES(cls):
+        lora_files = get_lora_files()
         return {
             "required": {
                 "pipeline": ("ST_FLUX2_PIPELINE",),
-                "lora_path": ("STRING", {
-                    "default": "",
-                    "multiline": False,
-                }),
+                "lora_name": (lora_files, {"default": lora_files[0] if lora_files else "none"}),
                 "lora_scale": ("FLOAT", {
                     "default": 1.0,
                     "min": 0.0,
@@ -206,22 +204,27 @@ class SimpleTunerFlux2LoRALoader:
                 }),
             },
             "optional": {
+                "lora_path_override": ("STRING", {"default": ""}),
                 "adapter_name": ("STRING", {"default": "default"}),
             }
         }
 
     @classmethod
-    def IS_CHANGED(cls, pipeline, lora_path, lora_scale, adapter_name="default"):
-        # Always reload if lora_path changes
-        return lora_path
+    def IS_CHANGED(cls, pipeline, lora_name, lora_scale, lora_path_override="", adapter_name="default"):
+        # Always reload if lora changes
+        return lora_path_override if lora_path_override else lora_name
 
     def load_lora(
         self,
         pipeline,
-        lora_path: str,
+        lora_name: str,
         lora_scale: float = 1.0,
+        lora_path_override: str = "",
         adapter_name: str = "default",
     ):
+        # Use override path if provided, otherwise use dropdown selection
+        lora_path = lora_path_override if lora_path_override else lora_name
+
         if not lora_path or lora_path == "none":
             logger.info("No LoRA path specified, returning pipeline unchanged")
             return (pipeline,)

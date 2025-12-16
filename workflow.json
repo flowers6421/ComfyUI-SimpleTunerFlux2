@@ -49,8 +49,9 @@
       ],
       "properties": {},
       "widgets_values": [
-        "/path/to/your/pytorch_lora_weights.safetensors",
+        "none",
         1.0,
+        "",
         "default"
       ]
     },
