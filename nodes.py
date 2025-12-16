@@ -263,6 +263,38 @@ class SimpleTunerFlux2PipelineLoader:
         logger.info(f"Loading Flux2 pipeline from {'local path' if is_local else 'HuggingFace'}: {model_source}")
         logger.info(f"Settings: dtype={torch_dtype}, device={device}, use_safetensors={use_safetensors} (preferred)")
 
+        # Verify this is a FLUX.2 model (not FLUX.1)
+        if is_local:
+            import json
+            model_index_path = os.path.join(model_source, "model_index.json")
+            if os.path.exists(model_index_path):
+                try:
+                    with open(model_index_path, 'r') as f:
+                        model_index = json.load(f)
+
+                    pipeline_class = model_index.get("_class_name", "")
+                    text_encoder_info = model_index.get("text_encoder", [])
+
+                    # FLUX.1 uses CLIPTextModel + T5EncoderModel
+                    # FLUX.2 uses Mistral3ForConditionalGeneration
+                    if "FluxPipeline" in pipeline_class or (isinstance(text_encoder_info, list) and len(text_encoder_info) > 1 and "CLIPTextModel" in str(text_encoder_info)):
+                        logger.error(
+                            f"Model at {model_source} appears to be FLUX.1 (FluxPipeline with CLIP/T5 text encoders), "
+                            f"not FLUX.2 (Flux2Pipeline with Mistral3 text encoder). "
+                            f"This node only supports FLUX.2 models trained with SimpleTuner."
+                        )
+                        raise ValueError(
+                            f"Incompatible model: Expected FLUX.2 (Flux2Pipeline), but found FLUX.1 (FluxPipeline). "
+                            f"FLUX.2 uses Mistral3 as the text encoder, while FLUX.1 uses CLIP + T5. "
+                            f"Please use a FLUX.2 model or the standard ComfyUI Flux nodes for FLUX.1 models."
+                        )
+
+                    logger.info(f"Model index detected: {pipeline_class}")
+                except json.JSONDecodeError:
+                    logger.warning(f"Could not parse model_index.json at {model_index_path}")
+            else:
+                logger.warning(f"No model_index.json found at {model_source}, proceeding with load attempt...")
+
         # Helper function to load a component with automatic format fallback
         def load_with_fallback(model_class, model_path, subfolder, base_kwargs, component_name):
             """
