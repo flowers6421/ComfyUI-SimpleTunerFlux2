@@ -1,0 +1,12 @@
+# ComfyUI-SimpleTunerFlux2 requirements
+# These are the core dependencies needed for SimpleTuner's Flux 2 pipeline
+
+torch>=2.0.0
+transformers>=4.38.0
+diffusers>=0.28.0
+safetensors>=0.4.0
+peft>=0.10.0
+accelerate>=0.27.0
+pillow>=9.0.0
+numpy>=1.24.0
+
