@@ -1,0 +1,119 @@
+{
+  "last_node_id": 5,
+  "last_link_id": 4,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "SimpleTunerFlux2PipelineLoader",
+      "pos": [50, 200],
+      "size": [300, 120],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "outputs": [
+        {
+          "name": "pipeline",
+          "type": "ST_FLUX2_PIPELINE",
+          "links": [1]
+        }
+      ],
+      "properties": {},
+      "widgets_values": [
+        "black-forest-labs/FLUX.1-dev",
+        "bfloat16",
+        "auto",
+        true
+      ]
+    },
+    {
+      "id": 2,
+      "type": "SimpleTunerFlux2LoRALoader",
+      "pos": [400, 200],
+      "size": [300, 120],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "pipeline",
+          "type": "ST_FLUX2_PIPELINE",
+          "link": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "pipeline",
+          "type": "ST_FLUX2_PIPELINE",
+          "links": [2]
+        }
+      ],
+      "properties": {},
+      "widgets_values": [
+        "/path/to/your/pytorch_lora_weights.safetensors",
+        1.0,
+        "default"
+      ]
+    },
+    {
+      "id": 3,
+      "type": "SimpleTunerFlux2Sampler",
+      "pos": [750, 200],
+      "size": [350, 300],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "pipeline",
+          "type": "ST_FLUX2_PIPELINE",
+          "link": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [3]
+        }
+      ],
+      "properties": {},
+      "widgets_values": [
+        "a beautiful sunset over mountains, high quality, detailed",
+        1024,
+        1024,
+        28,
+        3.5,
+        42,
+        1,
+        512
+      ]
+    },
+    {
+      "id": 4,
+      "type": "PreviewImage",
+      "pos": [1150, 200],
+      "size": [400, 400],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 3
+        }
+      ],
+      "properties": {}
+    }
+  ],
+  "links": [
+    [1, 1, 0, 2, 0, "ST_FLUX2_PIPELINE"],
+    [2, 2, 0, 3, 0, "ST_FLUX2_PIPELINE"],
+    [3, 3, 0, 4, 0, "IMAGE"]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {},
+  "version": 0.4
+}
+
