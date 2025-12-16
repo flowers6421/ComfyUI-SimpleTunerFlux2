@@ -97,38 +97,45 @@ def get_lora_files() -> List[str]:
 
 def get_diffusion_models() -> List[str]:
     """
-    Get list of available diffusion models from ComfyUI/models/diffusion_models/.
+    Get list of available diffusion models from ComfyUI/models/diffusion_models/ and /checkpoints/.
     Returns model directory names that contain a valid model_index.json.
     """
     models = ["none"]  # Default option for manual entry
 
     # Get ComfyUI base path
     comfy_base = os.path.dirname(os.path.dirname(PACKAGE_DIR))
-    diffusion_dir = os.path.join(comfy_base, "models", "diffusion_models")
 
-    if not os.path.exists(diffusion_dir):
-        return models
+    # Directories to scan for models
+    model_dirs = [
+        ("diffusion_models", os.path.join(comfy_base, "models", "diffusion_models")),
+        ("checkpoints", os.path.join(comfy_base, "models", "checkpoints")),
+    ]
 
-    try:
-        for item in os.listdir(diffusion_dir):
-            item_path = os.path.join(diffusion_dir, item)
-            if os.path.isdir(item_path):
-                # Check if it's a valid diffusers model (has model_index.json)
-                if os.path.exists(os.path.join(item_path, "model_index.json")):
-                    models.append(item)
-                # Also check HuggingFace cache structure (models--org--name)
-                elif item.startswith("models--"):
-                    snapshots_dir = os.path.join(item_path, "snapshots")
-                    if os.path.exists(snapshots_dir):
-                        for snapshot in os.listdir(snapshots_dir):
-                            snapshot_path = os.path.join(snapshots_dir, snapshot)
-                            if os.path.exists(os.path.join(snapshot_path, "model_index.json")):
-                                # Convert back to repo format: models--org--name -> org/name
-                                repo_id = item.replace("models--", "").replace("--", "/")
-                                models.append(repo_id)
-                                break
-    except Exception as e:
-        logger.warning(f"Error scanning diffusion_models directory: {e}")
+    for dir_name, model_dir in model_dirs:
+        if not os.path.exists(model_dir):
+            continue
+
+        try:
+            for item in os.listdir(model_dir):
+                item_path = os.path.join(model_dir, item)
+                if os.path.isdir(item_path):
+                    # Check if it's a valid diffusers model (has model_index.json)
+                    if os.path.exists(os.path.join(item_path, "model_index.json")):
+                        # Prefix with folder name to distinguish source
+                        models.append(f"{dir_name}/{item}")
+                    # Also check HuggingFace cache structure (models--org--name)
+                    elif item.startswith("models--"):
+                        snapshots_dir = os.path.join(item_path, "snapshots")
+                        if os.path.exists(snapshots_dir):
+                            for snapshot in os.listdir(snapshots_dir):
+                                snapshot_path = os.path.join(snapshots_dir, snapshot)
+                                if os.path.exists(os.path.join(snapshot_path, "model_index.json")):
+                                    # Convert back to repo format: models--org--name -> org/name
+                                    repo_id = item.replace("models--", "").replace("--", "/")
+                                    models.append(f"{dir_name}/{repo_id}")
+                                    break
+        except Exception as e:
+            logger.warning(f"Error scanning {dir_name} directory: {e}")
 
     return sorted(set(models))
 
@@ -300,28 +307,51 @@ class SimpleTunerFlux2PipelineLoader:
         # Ensure cache_dir is absolute
         cache_dir = os.path.abspath(cache_dir)
 
+        # Get ComfyUI base for checking multiple folders
+        comfy_base = os.path.dirname(os.path.dirname(PACKAGE_DIR))
+
+        # Check if model_id has a folder prefix (e.g., "diffusion_models/FLUX.2-dev" or "checkpoints/FLUX.2-dev")
+        if model_id.startswith("diffusion_models/") or model_id.startswith("checkpoints/"):
+            # Direct path from dropdown selection
+            direct_path = os.path.join(comfy_base, "models", model_id.replace("/", os.sep))
+            if os.path.exists(os.path.join(direct_path, "model_index.json")):
+                logger.info(f"Found valid local model at: {direct_path}")
+                return os.path.abspath(direct_path)
+
         # Possible local paths to check
         paths_to_check = []
 
-        # 1. Direct path in cache_dir (e.g., ComfyUI/models/diffusion_models/FLUX.2-dev/)
+        # Directories to search
+        search_dirs = [
+            cache_dir,  # diffusion_models (primary)
+            os.path.join(comfy_base, "models", "checkpoints"),  # checkpoints folder
+        ]
+
+        # Extract model name (last part of path)
         model_name = model_id.split("/")[-1] if "/" in model_id else model_id
-        paths_to_check.append(os.path.join(cache_dir, model_name))
 
-        # 2. Full model_id path (e.g., ComfyUI/models/diffusion_models/black-forest-labs/FLUX.2-dev/)
-        if "/" in model_id:
-            paths_to_check.append(os.path.join(cache_dir, model_id.replace("/", os.sep)))
+        for search_dir in search_dirs:
+            if not os.path.exists(search_dir):
+                continue
 
-        # 3. HuggingFace cache structure (models--org--name/snapshots/...)
-        hf_cache_name = f"models--{model_id.replace('/', '--')}"
-        hf_cache_path = os.path.join(cache_dir, hf_cache_name)
-        if os.path.exists(hf_cache_path):
-            # Find the latest snapshot
-            snapshots_dir = os.path.join(hf_cache_path, "snapshots")
-            if os.path.exists(snapshots_dir):
-                snapshots = os.listdir(snapshots_dir)
-                if snapshots:
-                    # Use the first (or latest) snapshot
-                    paths_to_check.append(os.path.join(snapshots_dir, snapshots[0]))
+            # 1. Direct path (e.g., ComfyUI/models/diffusion_models/FLUX.2-dev/)
+            paths_to_check.append(os.path.join(search_dir, model_name))
+
+            # 2. Full model_id path (e.g., ComfyUI/models/diffusion_models/black-forest-labs/FLUX.2-dev/)
+            if "/" in model_id:
+                paths_to_check.append(os.path.join(search_dir, model_id.replace("/", os.sep)))
+
+            # 3. HuggingFace cache structure (models--org--name/snapshots/...)
+            hf_cache_name = f"models--{model_id.replace('/', '--')}"
+            hf_cache_path = os.path.join(search_dir, hf_cache_name)
+            if os.path.exists(hf_cache_path):
+                # Find the latest snapshot
+                snapshots_dir = os.path.join(hf_cache_path, "snapshots")
+                if os.path.exists(snapshots_dir):
+                    snapshots = os.listdir(snapshots_dir)
+                    if snapshots:
+                        # Use the first (or latest) snapshot
+                        paths_to_check.append(os.path.join(snapshots_dir, snapshots[0]))
 
         # 4. Check if model_id is already an absolute path
         if os.path.isabs(model_id):
