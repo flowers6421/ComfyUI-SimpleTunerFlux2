@@ -212,14 +212,23 @@ class SimpleTunerFlux2PipelineLoader:
 
         ensure_simpletuner_imported()
 
-        # Import SimpleTuner modules
+        # Import SimpleTuner modules - these are the custom classes with fused architecture
         try:
             from simpletuner.helpers.models.flux2.pipeline import Flux2Pipeline
+            from simpletuner.helpers.models.flux2.transformer import Flux2Transformer2DModel
+            from simpletuner.helpers.models.flux2.autoencoder import AutoencoderKLFlux2
         except ImportError as e:
             raise ImportError(
-                f"Failed to import SimpleTuner Flux2Pipeline. "
+                f"Failed to import SimpleTuner Flux2 modules. "
                 f"Ensure SimpleTuner is installed at {get_simpletuner_path()}: {e}"
             )
+
+        # Also import diffusers components that SimpleTuner doesn't customize
+        try:
+            from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
+            from transformers import AutoProcessor, Mistral3ForConditionalGeneration
+        except ImportError as e:
+            raise ImportError(f"Failed to import diffusers/transformers components: {e}")
 
         # Parse dtype
         dtype_map = {
@@ -248,56 +257,103 @@ class SimpleTunerFlux2PipelineLoader:
 
         # Check for local model first (local-first loading strategy)
         local_path = self._find_local_model(model_id, cache_dir)
+        model_source = local_path if local_path else model_id
+        is_local = local_path is not None
 
-        if local_path:
-            logger.info(f"Found local model at: {local_path}")
-            logger.info(f"Loading Flux2 pipeline from local path with dtype={torch_dtype}, device={device}")
+        logger.info(f"Loading Flux2 pipeline from {'local path' if is_local else 'HuggingFace'}: {model_source}")
+        logger.info(f"Settings: dtype={torch_dtype}, device={device}, use_safetensors={use_safetensors}")
 
-            # Load from local path without network access
-            # Try preferred format first, then fall back to the other
-            pipeline = self._load_with_fallback(
-                Flux2Pipeline,
-                local_path,
-                dtype=dtype,
-                use_safetensors_preferred=use_safetensors,
-                local_files_only=True,
-                token=None,
-                cache_dir=None,
-            )
+        # Load components individually using SimpleTuner's custom classes
+        # This ensures we get the fused to_qkv_mlp_proj architecture
+        common_kwargs = {
+            "torch_dtype": dtype,
+            "use_safetensors": use_safetensors,
+        }
+        if is_local:
+            common_kwargs["local_files_only"] = True
         else:
-            logger.info(f"Loading Flux2 pipeline from {model_id} with dtype={torch_dtype}, device={device}")
+            if token:
+                common_kwargs["token"] = token
+            common_kwargs["cache_dir"] = cache_dir
 
-            # Load the pipeline from HuggingFace
-            # Try preferred format first, then fall back to the other
-            pipeline = self._load_with_fallback(
-                Flux2Pipeline,
-                model_id,
-                dtype=dtype,
-                use_safetensors_preferred=use_safetensors,
-                local_files_only=False,
-                token=token,
-                cache_dir=cache_dir,
+        try:
+            # Load transformer using SimpleTuner's Flux2Transformer2DModel
+            logger.info("Loading transformer (SimpleTuner Flux2Transformer2DModel)...")
+            transformer = Flux2Transformer2DModel.from_pretrained(
+                model_source,
+                subfolder="transformer",
+                **common_kwargs
             )
+            logger.info(f"Loaded transformer: {transformer.__class__.__module__}.{transformer.__class__.__name__}")
+
+            # Load VAE using SimpleTuner's AutoencoderKLFlux2
+            logger.info("Loading VAE (SimpleTuner AutoencoderKLFlux2)...")
+            vae = AutoencoderKLFlux2.from_pretrained(
+                model_source,
+                subfolder="vae",
+                **common_kwargs
+            )
+            logger.info(f"Loaded VAE: {vae.__class__.__module__}.{vae.__class__.__name__}")
+
+            # Load scheduler
+            logger.info("Loading scheduler...")
+            scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
+                model_source,
+                subfolder="scheduler",
+                local_files_only=is_local,
+            )
+
+            # Load text encoder and tokenizer
+            logger.info("Loading text encoder and tokenizer...")
+            text_encoder_kwargs = {"torch_dtype": dtype}
+            if is_local:
+                text_encoder_kwargs["local_files_only"] = True
+            else:
+                if token:
+                    text_encoder_kwargs["token"] = token
+
+            text_encoder = Mistral3ForConditionalGeneration.from_pretrained(
+                model_source,
+                subfolder="text_encoder",
+                **text_encoder_kwargs
+            )
+            tokenizer = AutoProcessor.from_pretrained(
+                model_source,
+                subfolder="tokenizer",
+                local_files_only=is_local,
+                token=token if not is_local else None,
+            )
+
+            # Assemble pipeline with SimpleTuner's custom components
+            logger.info("Assembling Flux2Pipeline with SimpleTuner components...")
+            pipeline = Flux2Pipeline(
+                scheduler=scheduler,
+                vae=vae,
+                text_encoder=text_encoder,
+                tokenizer=tokenizer,
+                transformer=transformer,
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to load Flux2 pipeline components: {e}")
+            raise
 
         pipeline = pipeline.to(device)
 
-        # Log transformer architecture info for debugging
+        # Verify fused architecture for LoRA compatibility
         transformer = getattr(pipeline, 'transformer', None)
         if transformer is not None:
-            transformer_class = transformer.__class__.__name__
-            logger.info(f"Loaded transformer: {transformer_class}")
-
             # Check for fused architecture (to_qkv_mlp_proj in single blocks)
             has_fused = False
             if hasattr(transformer, 'single_transformer_blocks') and len(transformer.single_transformer_blocks) > 0:
                 first_block = transformer.single_transformer_blocks[0]
                 if hasattr(first_block, 'attn') and hasattr(first_block.attn, 'to_qkv_mlp_proj'):
                     has_fused = True
-                    logger.info("Transformer has fused to_qkv_mlp_proj architecture (SimpleTuner-compatible)")
+                    logger.info("✓ Transformer has fused to_qkv_mlp_proj architecture (SimpleTuner-compatible)")
 
             if not has_fused:
                 logger.warning(
-                    "Transformer does NOT have fused to_qkv_mlp_proj architecture. "
+                    "⚠ Transformer does NOT have fused to_qkv_mlp_proj architecture. "
                     "SimpleTuner-trained LoRAs may not load correctly."
                 )
 
@@ -307,66 +363,6 @@ class SimpleTunerFlux2PipelineLoader:
 
         logger.info("Flux2 pipeline loaded successfully")
         return (pipeline,)
-
-    def _load_with_fallback(
-        self,
-        pipeline_class,
-        model_path: str,
-        dtype: torch.dtype,
-        use_safetensors_preferred: bool,
-        local_files_only: bool,
-        token: Optional[str],
-        cache_dir: Optional[str],
-    ):
-        """
-        Load pipeline with automatic fallback between safetensors and bin formats.
-
-        The use_safetensors parameter is treated as a preference, not a strict requirement.
-        If the preferred format fails, it will automatically try the other format.
-        """
-        # Build common kwargs
-        kwargs = {
-            "torch_dtype": dtype,
-            "local_files_only": local_files_only,
-        }
-        if token:
-            kwargs["token"] = token
-        if cache_dir:
-            kwargs["cache_dir"] = cache_dir
-
-        # Try preferred format first
-        formats_to_try = [use_safetensors_preferred, not use_safetensors_preferred]
-        last_error = None
-
-        for use_safetensors in formats_to_try:
-            format_name = "safetensors" if use_safetensors else "bin"
-            try:
-                logger.info(f"Attempting to load with use_safetensors={use_safetensors} ({format_name} format)")
-                pipeline = pipeline_class.from_pretrained(
-                    model_path,
-                    use_safetensors=use_safetensors,
-                    **kwargs
-                )
-                logger.info(f"Successfully loaded model with {format_name} format")
-                return pipeline
-            except Exception as e:
-                error_msg = str(e).lower()
-                # Check if this is a file format error (missing .bin or .safetensors)
-                if "could not find" in error_msg or "does not appear to have" in error_msg or "no file named" in error_msg:
-                    logger.warning(f"Format {format_name} not available, will try alternative: {e}")
-                    last_error = e
-                    continue
-                else:
-                    # Other error - re-raise immediately
-                    logger.error(f"Failed to load pipeline: {e}")
-                    raise
-
-        # If we get here, both formats failed
-        if last_error:
-            logger.error(f"Failed to load model with both safetensors and bin formats. Last error: {last_error}")
-            raise last_error
-        else:
-            raise RuntimeError(f"Failed to load model from {model_path}")
 
     def _find_local_model(self, model_id: str, cache_dir: str) -> Optional[str]:
         """
