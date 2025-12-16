@@ -95,29 +95,69 @@ def get_lora_files() -> List[str]:
     return sorted(set(lora_paths)) if lora_paths else ["none"]
 
 
+def get_diffusion_models() -> List[str]:
+    """
+    Get list of available diffusion models from ComfyUI/models/diffusion_models/.
+    Returns model directory names that contain a valid model_index.json.
+    """
+    models = ["none"]  # Default option for manual entry
+
+    # Get ComfyUI base path
+    comfy_base = os.path.dirname(os.path.dirname(PACKAGE_DIR))
+    diffusion_dir = os.path.join(comfy_base, "models", "diffusion_models")
+
+    if not os.path.exists(diffusion_dir):
+        return models
+
+    try:
+        for item in os.listdir(diffusion_dir):
+            item_path = os.path.join(diffusion_dir, item)
+            if os.path.isdir(item_path):
+                # Check if it's a valid diffusers model (has model_index.json)
+                if os.path.exists(os.path.join(item_path, "model_index.json")):
+                    models.append(item)
+                # Also check HuggingFace cache structure (models--org--name)
+                elif item.startswith("models--"):
+                    snapshots_dir = os.path.join(item_path, "snapshots")
+                    if os.path.exists(snapshots_dir):
+                        for snapshot in os.listdir(snapshots_dir):
+                            snapshot_path = os.path.join(snapshots_dir, snapshot)
+                            if os.path.exists(os.path.join(snapshot_path, "model_index.json")):
+                                # Convert back to repo format: models--org--name -> org/name
+                                repo_id = item.replace("models--", "").replace("--", "/")
+                                models.append(repo_id)
+                                break
+    except Exception as e:
+        logger.warning(f"Error scanning diffusion_models directory: {e}")
+
+    return sorted(set(models))
+
+
 class SimpleTunerFlux2PipelineLoader:
     """
     Load the Flux 2 base model using SimpleTuner's custom pipeline implementation.
     This handles the fused to_qkv_mlp_proj architecture specific to SimpleTuner.
     """
-    
+
     CATEGORY = "SimpleTuner/Flux2"
     FUNCTION = "load_pipeline"
     RETURN_TYPES = ("ST_FLUX2_PIPELINE",)
     RETURN_NAMES = ("pipeline",)
-    
+
     @classmethod
     def INPUT_TYPES(cls):
+        available_models = get_diffusion_models()
         return {
             "required": {
-                "model_id": ("STRING", {
-                    "default": "black-forest-labs/FLUX.2-dev",
-                    "multiline": False,
-                }),
+                "model_name": (available_models, {"default": available_models[0]}),
                 "torch_dtype": (["bfloat16", "float16", "float32"], {"default": "bfloat16"}),
                 "device": (["cuda", "cpu", "auto"], {"default": "auto"}),
             },
             "optional": {
+                "model_id_override": ("STRING", {
+                    "default": "",
+                    "multiline": False,
+                }),
                 "use_safetensors": ("BOOLEAN", {"default": True}),
                 "hf_token": ("STRING", {
                     "default": "",
@@ -128,13 +168,24 @@ class SimpleTunerFlux2PipelineLoader:
 
     def load_pipeline(
         self,
-        model_id: str,
+        model_name: str,
         torch_dtype: str,
         device: str,
+        model_id_override: str = "",
         use_safetensors: bool = True,
         hf_token: str = "",
     ):
         global _cached_pipeline, _cached_pipeline_id
+
+        # Use override if provided, otherwise use dropdown selection
+        model_id = model_id_override.strip() if model_id_override.strip() else model_name
+
+        # Skip if "none" selected and no override provided
+        if model_id == "none":
+            raise ValueError(
+                "No model selected. Either select a local model from the dropdown "
+                "or enter a HuggingFace model ID in the 'model_id_override' field."
+            )
 
         # Check cache
         cache_key = f"{model_id}_{torch_dtype}_{device}"
@@ -171,8 +222,10 @@ class SimpleTunerFlux2PipelineLoader:
             logger.info("Using provided HuggingFace token for authentication")
 
         # Set cache directory to ComfyUI/models/diffusion_models/
-        comfy_base = os.path.dirname(os.path.dirname(os.path.dirname(PACKAGE_DIR)))
-        cache_dir = os.path.join(comfy_base, "models", "diffusion_models")
+        # PACKAGE_DIR is already absolute (from os.path.abspath in definition)
+        # Go up: custom_nodes/ComfyUI-SimpleTunerFlux2 -> custom_nodes -> ComfyUI
+        comfy_base = os.path.dirname(os.path.dirname(PACKAGE_DIR))
+        cache_dir = os.path.abspath(os.path.join(comfy_base, "models", "diffusion_models"))
         os.makedirs(cache_dir, exist_ok=True)
         logger.info(f"Model cache directory: {cache_dir}")
 
@@ -242,8 +295,11 @@ class SimpleTunerFlux2PipelineLoader:
     def _find_local_model(self, model_id: str, cache_dir: str) -> Optional[str]:
         """
         Check if model exists locally in various possible locations.
-        Returns the local path if found, None otherwise.
+        Returns the absolute local path if found, None otherwise.
         """
+        # Ensure cache_dir is absolute
+        cache_dir = os.path.abspath(cache_dir)
+
         # Possible local paths to check
         paths_to_check = []
 
@@ -273,10 +329,12 @@ class SimpleTunerFlux2PipelineLoader:
 
         # Check each path for model_index.json (indicates a valid diffusers model)
         for path in paths_to_check:
-            model_index = os.path.join(path, "model_index.json")
+            # Ensure absolute path
+            abs_path = os.path.abspath(path)
+            model_index = os.path.join(abs_path, "model_index.json")
             if os.path.exists(model_index):
-                logger.debug(f"Found valid model at: {path}")
-                return path
+                logger.info(f"Found valid local model at: {abs_path}")
+                return abs_path
 
         return None
 
