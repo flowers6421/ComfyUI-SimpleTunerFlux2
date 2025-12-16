@@ -119,26 +119,31 @@ class SimpleTunerFlux2PipelineLoader:
             },
             "optional": {
                 "use_safetensors": ("BOOLEAN", {"default": True}),
+                "hf_token": ("STRING", {
+                    "default": "",
+                    "multiline": False,
+                }),
             }
         }
-    
+
     def load_pipeline(
         self,
         model_id: str,
         torch_dtype: str,
         device: str,
         use_safetensors: bool = True,
+        hf_token: str = "",
     ):
         global _cached_pipeline, _cached_pipeline_id
-        
+
         # Check cache
         cache_key = f"{model_id}_{torch_dtype}_{device}"
         if _cached_pipeline is not None and _cached_pipeline_id == cache_key:
             logger.info("Using cached Flux2 pipeline")
             return (_cached_pipeline,)
-        
+
         ensure_simpletuner_imported()
-        
+
         # Import SimpleTuner modules
         try:
             from simpletuner.helpers.models.flux2.pipeline import Flux2Pipeline
@@ -147,7 +152,7 @@ class SimpleTunerFlux2PipelineLoader:
                 f"Failed to import SimpleTuner Flux2Pipeline. "
                 f"Ensure SimpleTuner is installed at {get_simpletuner_path()}: {e}"
             )
-        
+
         # Parse dtype
         dtype_map = {
             "bfloat16": torch.bfloat16,
@@ -155,11 +160,22 @@ class SimpleTunerFlux2PipelineLoader:
             "float32": torch.float32,
         }
         dtype = dtype_map.get(torch_dtype, torch.bfloat16)
-        
+
         # Determine device
         if device == "auto":
             device = "cuda" if torch.cuda.is_available() else "cpu"
-        
+
+        # Set up HuggingFace token if provided
+        token = hf_token.strip() if hf_token else None
+        if token:
+            logger.info("Using provided HuggingFace token for authentication")
+
+        # Set cache directory to ComfyUI/models/diffusion_models/
+        comfy_base = os.path.dirname(os.path.dirname(os.path.dirname(PACKAGE_DIR)))
+        cache_dir = os.path.join(comfy_base, "models", "diffusion_models")
+        os.makedirs(cache_dir, exist_ok=True)
+        logger.info(f"Model cache directory: {cache_dir}")
+
         logger.info(f"Loading Flux2 pipeline from {model_id} with dtype={torch_dtype}, device={device}")
 
         # Load the pipeline
@@ -168,6 +184,8 @@ class SimpleTunerFlux2PipelineLoader:
                 model_id,
                 torch_dtype=dtype,
                 use_safetensors=use_safetensors,
+                cache_dir=cache_dir,
+                token=token,
             )
         except Exception as e:
             logger.error(f"Failed to load Flux2Pipeline from {model_id}: {e}")
