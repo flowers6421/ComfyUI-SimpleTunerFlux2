@@ -176,20 +176,39 @@ class SimpleTunerFlux2PipelineLoader:
         os.makedirs(cache_dir, exist_ok=True)
         logger.info(f"Model cache directory: {cache_dir}")
 
-        logger.info(f"Loading Flux2 pipeline from {model_id} with dtype={torch_dtype}, device={device}")
+        # Check for local model first (local-first loading strategy)
+        local_path = self._find_local_model(model_id, cache_dir)
 
-        # Load the pipeline
-        try:
-            pipeline = Flux2Pipeline.from_pretrained(
-                model_id,
-                torch_dtype=dtype,
-                use_safetensors=use_safetensors,
-                cache_dir=cache_dir,
-                token=token,
-            )
-        except Exception as e:
-            logger.error(f"Failed to load Flux2Pipeline from {model_id}: {e}")
-            raise
+        if local_path:
+            logger.info(f"Found local model at: {local_path}")
+            logger.info(f"Loading Flux2 pipeline from local path with dtype={torch_dtype}, device={device}")
+
+            # Load from local path without network access
+            try:
+                pipeline = Flux2Pipeline.from_pretrained(
+                    local_path,
+                    torch_dtype=dtype,
+                    use_safetensors=use_safetensors,
+                    local_files_only=True,
+                )
+            except Exception as e:
+                logger.error(f"Failed to load Flux2Pipeline from local path {local_path}: {e}")
+                raise
+        else:
+            logger.info(f"Loading Flux2 pipeline from {model_id} with dtype={torch_dtype}, device={device}")
+
+            # Load the pipeline from HuggingFace
+            try:
+                pipeline = Flux2Pipeline.from_pretrained(
+                    model_id,
+                    torch_dtype=dtype,
+                    use_safetensors=use_safetensors,
+                    cache_dir=cache_dir,
+                    token=token,
+                )
+            except Exception as e:
+                logger.error(f"Failed to load Flux2Pipeline from {model_id}: {e}")
+                raise
 
         pipeline = pipeline.to(device)
 
@@ -219,6 +238,47 @@ class SimpleTunerFlux2PipelineLoader:
 
         logger.info("Flux2 pipeline loaded successfully")
         return (pipeline,)
+
+    def _find_local_model(self, model_id: str, cache_dir: str) -> Optional[str]:
+        """
+        Check if model exists locally in various possible locations.
+        Returns the local path if found, None otherwise.
+        """
+        # Possible local paths to check
+        paths_to_check = []
+
+        # 1. Direct path in cache_dir (e.g., ComfyUI/models/diffusion_models/FLUX.2-dev/)
+        model_name = model_id.split("/")[-1] if "/" in model_id else model_id
+        paths_to_check.append(os.path.join(cache_dir, model_name))
+
+        # 2. Full model_id path (e.g., ComfyUI/models/diffusion_models/black-forest-labs/FLUX.2-dev/)
+        if "/" in model_id:
+            paths_to_check.append(os.path.join(cache_dir, model_id.replace("/", os.sep)))
+
+        # 3. HuggingFace cache structure (models--org--name/snapshots/...)
+        hf_cache_name = f"models--{model_id.replace('/', '--')}"
+        hf_cache_path = os.path.join(cache_dir, hf_cache_name)
+        if os.path.exists(hf_cache_path):
+            # Find the latest snapshot
+            snapshots_dir = os.path.join(hf_cache_path, "snapshots")
+            if os.path.exists(snapshots_dir):
+                snapshots = os.listdir(snapshots_dir)
+                if snapshots:
+                    # Use the first (or latest) snapshot
+                    paths_to_check.append(os.path.join(snapshots_dir, snapshots[0]))
+
+        # 4. Check if model_id is already an absolute path
+        if os.path.isabs(model_id):
+            paths_to_check.append(model_id)
+
+        # Check each path for model_index.json (indicates a valid diffusers model)
+        for path in paths_to_check:
+            model_index = os.path.join(path, "model_index.json")
+            if os.path.exists(model_index):
+                logger.debug(f"Found valid model at: {path}")
+                return path
+
+        return None
 
 
 class SimpleTunerFlux2LoRALoader:
