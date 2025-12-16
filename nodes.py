@@ -261,68 +261,133 @@ class SimpleTunerFlux2PipelineLoader:
         is_local = local_path is not None
 
         logger.info(f"Loading Flux2 pipeline from {'local path' if is_local else 'HuggingFace'}: {model_source}")
-        logger.info(f"Settings: dtype={torch_dtype}, device={device}, use_safetensors={use_safetensors}")
+        logger.info(f"Settings: dtype={torch_dtype}, device={device}, use_safetensors={use_safetensors} (preferred)")
 
-        # Load components individually using SimpleTuner's custom classes
-        # This ensures we get the fused to_qkv_mlp_proj architecture
-        common_kwargs = {
-            "torch_dtype": dtype,
-            "use_safetensors": use_safetensors,
-        }
+        # Helper function to load a component with automatic format fallback
+        def load_with_fallback(model_class, model_path, subfolder, base_kwargs, component_name):
+            """
+            Load a model component with automatic fallback between safetensors and bin formats.
+            Tries the preferred format first, then falls back to the alternative if not found.
+            """
+            formats_to_try = [use_safetensors, not use_safetensors]
+            last_error = None
+
+            for try_safetensors in formats_to_try:
+                format_name = "safetensors" if try_safetensors else "bin"
+                is_fallback = (try_safetensors != use_safetensors)
+
+                try:
+                    kwargs = {**base_kwargs, "use_safetensors": try_safetensors}
+                    if subfolder:
+                        kwargs["subfolder"] = subfolder
+
+                    if is_fallback:
+                        logger.info(f"  Trying fallback format ({format_name}) for {component_name}...")
+                    else:
+                        logger.info(f"  Loading {component_name} with {format_name} format...")
+
+                    result = model_class.from_pretrained(model_path, **kwargs)
+
+                    if is_fallback:
+                        logger.info(f"  ✓ Loaded {component_name} using fallback format ({format_name})")
+                    else:
+                        logger.info(f"  ✓ Loaded {component_name}")
+
+                    return result
+
+                except Exception as e:
+                    error_msg = str(e).lower()
+                    # Check if this is a file format error (missing .bin or .safetensors)
+                    format_errors = [
+                        "no file named",
+                        "could not find",
+                        "does not appear to have",
+                        "diffusion_pytorch_model.bin",
+                        "diffusion_pytorch_model.safetensors",
+                        "model.safetensors",
+                        "model.bin",
+                    ]
+                    is_format_error = any(err in error_msg for err in format_errors)
+
+                    if is_format_error and not is_fallback:
+                        # Format not available, will try fallback
+                        logger.warning(f"  {format_name} format not available for {component_name}, trying alternative...")
+                        last_error = e
+                        continue
+                    else:
+                        # Either it's not a format error, or fallback also failed
+                        raise
+
+            # If we get here, both formats failed
+            if last_error:
+                raise last_error
+            raise RuntimeError(f"Failed to load {component_name}")
+
+        # Base kwargs for components that support use_safetensors
+        base_kwargs_with_safetensors = {"torch_dtype": dtype}
         if is_local:
-            common_kwargs["local_files_only"] = True
+            base_kwargs_with_safetensors["local_files_only"] = True
         else:
             if token:
-                common_kwargs["token"] = token
-            common_kwargs["cache_dir"] = cache_dir
+                base_kwargs_with_safetensors["token"] = token
+            base_kwargs_with_safetensors["cache_dir"] = cache_dir
+
+        # Base kwargs for components that don't use safetensors parameter
+        base_kwargs_no_safetensors = {"torch_dtype": dtype}
+        if is_local:
+            base_kwargs_no_safetensors["local_files_only"] = True
+        else:
+            if token:
+                base_kwargs_no_safetensors["token"] = token
 
         try:
             # Load transformer using SimpleTuner's Flux2Transformer2DModel
             logger.info("Loading transformer (SimpleTuner Flux2Transformer2DModel)...")
-            transformer = Flux2Transformer2DModel.from_pretrained(
+            transformer = load_with_fallback(
+                Flux2Transformer2DModel,
                 model_source,
-                subfolder="transformer",
-                **common_kwargs
+                "transformer",
+                base_kwargs_with_safetensors,
+                "transformer"
             )
-            logger.info(f"Loaded transformer: {transformer.__class__.__module__}.{transformer.__class__.__name__}")
+            logger.info(f"  Class: {transformer.__class__.__module__}.{transformer.__class__.__name__}")
 
             # Load VAE using SimpleTuner's AutoencoderKLFlux2
             logger.info("Loading VAE (SimpleTuner AutoencoderKLFlux2)...")
-            vae = AutoencoderKLFlux2.from_pretrained(
+            vae = load_with_fallback(
+                AutoencoderKLFlux2,
                 model_source,
-                subfolder="vae",
-                **common_kwargs
+                "vae",
+                base_kwargs_with_safetensors,
+                "VAE"
             )
-            logger.info(f"Loaded VAE: {vae.__class__.__module__}.{vae.__class__.__name__}")
+            logger.info(f"  Class: {vae.__class__.__module__}.{vae.__class__.__name__}")
 
-            # Load scheduler
+            # Load scheduler (no safetensors parameter needed - it's just config)
             logger.info("Loading scheduler...")
             scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
                 model_source,
                 subfolder="scheduler",
                 local_files_only=is_local,
             )
+            logger.info("  ✓ Loaded scheduler")
 
-            # Load text encoder and tokenizer
+            # Load text encoder and tokenizer (transformers library handles format automatically)
             logger.info("Loading text encoder and tokenizer...")
-            text_encoder_kwargs = {"torch_dtype": dtype}
-            if is_local:
-                text_encoder_kwargs["local_files_only"] = True
-            else:
-                if token:
-                    text_encoder_kwargs["token"] = token
-
             text_encoder = Mistral3ForConditionalGeneration.from_pretrained(
                 model_source,
                 subfolder="text_encoder",
-                **text_encoder_kwargs
+                **base_kwargs_no_safetensors
             )
+            logger.info("  ✓ Loaded text encoder")
+
             tokenizer = AutoProcessor.from_pretrained(
                 model_source,
                 subfolder="tokenizer",
                 local_files_only=is_local,
                 token=token if not is_local else None,
             )
+            logger.info("  ✓ Loaded tokenizer")
 
             # Assemble pipeline with SimpleTuner's custom components
             logger.info("Assembling Flux2Pipeline with SimpleTuner components...")
