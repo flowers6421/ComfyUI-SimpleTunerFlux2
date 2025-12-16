@@ -161,15 +161,40 @@ class SimpleTunerFlux2PipelineLoader:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         
         logger.info(f"Loading Flux2 pipeline from {model_id} with dtype={torch_dtype}, device={device}")
-        
+
         # Load the pipeline
-        pipeline = Flux2Pipeline.from_pretrained(
-            model_id,
-            torch_dtype=dtype,
-            use_safetensors=use_safetensors,
-        )
+        try:
+            pipeline = Flux2Pipeline.from_pretrained(
+                model_id,
+                torch_dtype=dtype,
+                use_safetensors=use_safetensors,
+            )
+        except Exception as e:
+            logger.error(f"Failed to load Flux2Pipeline from {model_id}: {e}")
+            raise
+
         pipeline = pipeline.to(device)
-        
+
+        # Log transformer architecture info for debugging
+        transformer = getattr(pipeline, 'transformer', None)
+        if transformer is not None:
+            transformer_class = transformer.__class__.__name__
+            logger.info(f"Loaded transformer: {transformer_class}")
+
+            # Check for fused architecture (to_qkv_mlp_proj in single blocks)
+            has_fused = False
+            if hasattr(transformer, 'single_transformer_blocks') and len(transformer.single_transformer_blocks) > 0:
+                first_block = transformer.single_transformer_blocks[0]
+                if hasattr(first_block, 'attn') and hasattr(first_block.attn, 'to_qkv_mlp_proj'):
+                    has_fused = True
+                    logger.info("Transformer has fused to_qkv_mlp_proj architecture (SimpleTuner-compatible)")
+
+            if not has_fused:
+                logger.warning(
+                    "Transformer does NOT have fused to_qkv_mlp_proj architecture. "
+                    "SimpleTuner-trained LoRAs may not load correctly."
+                )
+
         # Cache the pipeline
         _cached_pipeline = pipeline
         _cached_pipeline_id = cache_key
@@ -225,8 +250,10 @@ class SimpleTunerFlux2LoRALoader:
         # Use override path if provided, otherwise use dropdown selection
         lora_path = lora_path_override if lora_path_override else lora_name
 
-        if not lora_path or lora_path == "none":
-            logger.info("No LoRA path specified, returning pipeline unchanged")
+        # Handle skip values - "none", "default", empty string should all skip loading
+        skip_values = {"none", "default", ""}
+        if not lora_path or lora_path.lower() in skip_values:
+            logger.info(f"Skipping LoRA loading (lora_path='{lora_path}')")
             return (pipeline,)
 
         # Resolve the LoRA path
@@ -237,11 +264,23 @@ class SimpleTunerFlux2LoRALoader:
 
         logger.info(f"Loading LoRA weights from {resolved_path} with scale={lora_scale}")
 
-        # Load the LoRA weights using SimpleTuner's method
-        pipeline.load_lora_weights(
-            resolved_path,
-            adapter_name=adapter_name,
-        )
+        try:
+            # Load the LoRA weights using SimpleTuner's method
+            pipeline.load_lora_weights(
+                resolved_path,
+                adapter_name=adapter_name,
+            )
+        except ValueError as e:
+            error_msg = str(e)
+            if "Target modules" in error_msg and "not found" in error_msg:
+                # Provide more helpful error message for architecture mismatch
+                logger.error(
+                    f"LoRA architecture mismatch: {error_msg}\n"
+                    f"This LoRA may have been trained with a different model architecture.\n"
+                    f"SimpleTuner Flux2 uses fused 'to_qkv_mlp_proj' layers in single-stream blocks.\n"
+                    f"Make sure the base model is loaded via SimpleTuner's Flux2Pipeline."
+                )
+            raise
 
         # Set the LoRA scale
         if hasattr(pipeline, 'set_adapters'):
