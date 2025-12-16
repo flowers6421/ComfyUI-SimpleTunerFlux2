@@ -67,6 +67,23 @@ if [ -f "requirements.txt" ]; then
 fi
 
 echo ""
+echo "[4/4] HuggingFace Token (optional)..."
+echo "Some models require authentication with HuggingFace."
+read -p "Do you want to configure HuggingFace token? (y/N): " configure_hf
+if [[ "$configure_hf" =~ ^[Yy]$ ]]; then
+    read -p "Enter your HuggingFace token: " hf_token
+    if [ -n "$hf_token" ]; then
+        pip install -q huggingface_hub 2>/dev/null || true
+        python -c "from huggingface_hub import login; login(token='$hf_token')" 2>/dev/null && \
+            echo "HuggingFace token configured successfully." || \
+            echo "Warning: Failed to configure HuggingFace token."
+    fi
+else
+    echo "Skipping HuggingFace token configuration."
+    echo "You can configure it later with: huggingface-cli login"
+fi
+
+echo ""
 echo "=========================================="
 echo "Installation complete!"
 echo "=========================================="

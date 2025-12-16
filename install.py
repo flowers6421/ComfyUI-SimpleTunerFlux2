@@ -98,6 +98,26 @@ def main():
             ignore_errors=True
         )
     
+    # Step 4: Optional HuggingFace token
+    print("\n[4/4] HuggingFace Token (optional)...")
+    print("Some models require authentication with HuggingFace.")
+    try:
+        configure_hf = input("Do you want to configure HuggingFace token? (y/N): ").strip().lower()
+        if configure_hf == 'y':
+            hf_token = input("Enter your HuggingFace token: ").strip()
+            if hf_token:
+                try:
+                    from huggingface_hub import login
+                    login(token=hf_token)
+                    print("HuggingFace token configured successfully.")
+                except Exception as e:
+                    print(f"Warning: Failed to configure HuggingFace token: {e}")
+        else:
+            print("Skipping HuggingFace token configuration.")
+            print("You can configure it later with: huggingface-cli login")
+    except EOFError:
+        print("Skipping HuggingFace token (non-interactive mode).")
+
     print("\n" + "=" * 50)
     print("Installation complete!")
     print("=" * 50)
